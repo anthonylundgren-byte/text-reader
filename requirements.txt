@@ -4,3 +4,4 @@ pdfplumber
 pytesseract
 Pillow
 edge-tts
+truststore
