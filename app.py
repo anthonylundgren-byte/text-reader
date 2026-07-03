@@ -10,7 +10,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ── Tesseract path detection (Windows) ─────────────────────────────────────────
+# ── Tesseract path detection (Windows local runs only) ─────────────────────────
 TESSERACT_PATHS = [
     r"C:\Program Files\Tesseract-OCR\tesseract.exe",
     r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
@@ -67,80 +67,45 @@ def extract_from_image(file_bytes: bytes, lang: str = "eng") -> str:
     return pytesseract.image_to_string(image, lang=lang)
 
 
-# ── Text-to-speech component ────────────────────────────────────────────────────
+# ── Text-to-speech via gTTS ─────────────────────────────────────────────────────
 
-def tts_component(text: str, rate: float = 1.0):
+# gTTS language codes mapped to our OCR language codes for convenience
+GTTS_LANG_MAP = {
+    "eng": "en",
+    "spa": "es",
+    "fra": "fr",
+    "deu": "de",
+    "ita": "it",
+    "por": "pt",
+    "chi_sim": "zh-CN",
+    "jpn": "ja",
+}
+
+def generate_audio(text: str, lang_code: str = "en", slow: bool = False) -> bytes:
     """
-    Inject a Web Speech API player into the page.
-    Works on desktop browsers and mobile (iOS Safari / Android Chrome).
-    No API key or internet required.
+    Convert text to speech using gTTS and return MP3 bytes.
+    gTTS calls Google's TTS service — requires internet but works on
+    Streamlit Cloud and every mobile browser via st.audio().
     """
-    # Escape backticks and backslashes so the JS template literal is safe
-    safe_text = text.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
+    from gtts import gTTS
 
-    html = f"""
-    <div id="tts-container" style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
-      <button id="btn-play"  onclick="startReading()"
-        style="padding:10px 20px; font-size:16px; border-radius:8px;
-               background:#4CAF50; color:white; border:none; cursor:pointer;">
-        ▶ Read Aloud
-      </button>
-      <button id="btn-pause" onclick="togglePause()"
-        style="padding:10px 20px; font-size:16px; border-radius:8px;
-               background:#FF9800; color:white; border:none; cursor:pointer;">
-        ⏸ Pause
-      </button>
-      <button id="btn-stop"  onclick="stopReading()"
-        style="padding:10px 20px; font-size:16px; border-radius:8px;
-               background:#f44336; color:white; border:none; cursor:pointer;">
-        ⏹ Stop
-      </button>
-    </div>
+    # gTTS can struggle with very long texts in one shot; chunk at ~2 000 chars
+    CHUNK_SIZE = 2000
+    if len(text) <= CHUNK_SIZE:
+        tts = gTTS(text=text, lang=lang_code, slow=slow)
+        buf = io.BytesIO()
+        tts.write_to_fp(buf)
+        return buf.getvalue()
 
-    <div id="tts-status" style="margin-top:6px; font-size:13px; color:#888;"></div>
-
-    <script>
-      var synth   = window.speechSynthesis;
-      var utterance = null;
-      var paused  = false;
-
-      function startReading() {{
-        if (synth.speaking) synth.cancel();
-        var text = `{safe_text}`;
-        utterance = new SpeechSynthesisUtterance(text);
-        utterance.rate = {rate};
-        utterance.onstart = function()  {{ setStatus("🔊 Reading…"); }};
-        utterance.onend   = function()  {{ setStatus("✅ Done");     }};
-        utterance.onerror = function(e) {{ setStatus("❌ Error: " + e.error); }};
-        synth.speak(utterance);
-        paused = false;
-        setStatus("🔊 Starting…");
-      }}
-
-      function togglePause() {{
-        if (synth.speaking && !paused) {{
-          synth.pause();
-          paused = true;
-          setStatus("⏸ Paused");
-        }} else if (paused) {{
-          synth.resume();
-          paused = false;
-          setStatus("🔊 Resumed…");
-        }}
-      }}
-
-      function stopReading() {{
-        synth.cancel();
-        paused = false;
-        setStatus("⏹ Stopped");
-      }}
-
-      function setStatus(msg) {{
-        document.getElementById("tts-status").textContent = msg;
-      }}
-    </script>
-    """
-    st.components.v1.html(html, height=120)
+    # For longer texts, generate each chunk and concatenate the raw MP3 bytes
+    chunks = [text[i: i + CHUNK_SIZE] for i in range(0, len(text), CHUNK_SIZE)]
+    audio_parts = []
+    for chunk in chunks:
+        tts = gTTS(text=chunk, lang=lang_code, slow=slow)
+        buf = io.BytesIO()
+        tts.write_to_fp(buf)
+        audio_parts.append(buf.getvalue())
+    return b"".join(audio_parts)
 
 
 # ── Sidebar ─────────────────────────────────────────────────────────────────────
@@ -152,13 +117,14 @@ with st.sidebar:
         1. Pick an input method (tabs below)
         2. Paste text or upload a file
         3. Click **Extract Text**
-        4. Adjust speed, then click **▶ Read Aloud**
+        4. Click **🔊 Generate Audio** to create the audio
+        5. Press play on the audio player
         """
     )
     st.divider()
     st.subheader("⚙️ Settings")
-    speech_rate = st.slider("Reading speed", min_value=0.5, max_value=2.0, value=1.0, step=0.1)
-    ocr_lang    = st.selectbox(
+    slow_mode = st.checkbox("🐢 Slow reading speed", value=False)
+    ocr_lang  = st.selectbox(
         "OCR language (images)",
         options=["eng", "spa", "fra", "deu", "ita", "por", "chi_sim", "jpn"],
         format_func=lambda x: {
@@ -168,7 +134,7 @@ with st.sidebar:
         }.get(x, x),
     )
     st.divider()
-    st.caption("Uses your browser's built-in text-to-speech — works on desktop & mobile.")
+    st.caption("Audio is generated by Google TTS — works on all devices including mobile.")
 
 
 # ── Main area ───────────────────────────────────────────────────────────────────
@@ -179,8 +145,6 @@ st.caption("Paste text, upload a Word doc, PDF, or image — then have it read b
 tab_paste, tab_word, tab_pdf, tab_image = st.tabs(
     ["📋 Paste Text", "📄 Word Doc", "📑 PDF", "🖼️ Image / Photo"]
 )
-
-extracted_text = ""
 
 with tab_paste:
     st.subheader("Paste your text")
@@ -194,6 +158,7 @@ with tab_paste:
     if st.button("Use This Text", key="use_paste", type="primary"):
         if pasted.strip():
             st.session_state["text"] = pasted.strip()
+            st.session_state.pop("audio", None)   # clear old audio
             st.success(f"✅ {len(pasted.split())} words loaded.")
         else:
             st.warning("Nothing to use — text area is empty.")
@@ -206,6 +171,7 @@ with tab_word:
             try:
                 result = extract_from_docx(docx_file.read())
                 st.session_state["text"] = result
+                st.session_state.pop("audio", None)
                 st.success(f"✅ {len(result.split())} words extracted.")
             except Exception as e:
                 st.error(f"Could not read file: {e}")
@@ -224,6 +190,7 @@ with tab_pdf:
                     )
                 else:
                     st.session_state["text"] = result
+                    st.session_state.pop("audio", None)
                     st.success(f"✅ {len(result.split())} words extracted.")
             except Exception as e:
                 st.error(f"Could not read PDF: {e}")
@@ -244,6 +211,7 @@ with tab_image:
                     st.warning("No text detected in this image.")
                 else:
                     st.session_state["text"] = result
+                    st.session_state.pop("audio", None)
                     st.success(f"✅ {len(result.split())} words detected.")
             except Exception as e:
                 st.error(f"OCR failed: {e}")
@@ -256,9 +224,9 @@ st.subheader("📝 Extracted / Transcribed Text")
 current_text = st.session_state.get("text", "")
 
 if current_text:
-    # Editable display — user can tweak before reading aloud
+    # Editable display — user can tweak before generating audio
     edited_text = st.text_area(
-        "Text (editable — make changes before reading)",
+        "Text (editable — make changes before generating audio)",
         value=current_text,
         height=300,
         label_visibility="collapsed",
@@ -273,13 +241,15 @@ if current_text:
     with col3:
         if st.button("🗑️ Clear", key="clear_text"):
             st.session_state.pop("text", None)
+            st.session_state.pop("audio", None)
             st.rerun()
 
     # Copy-to-clipboard button
+    safe_text = edited_text.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
     copy_js = f"""
     <script>
       function copyText() {{
-        navigator.clipboard.writeText(`{edited_text.replace("`", "\\`").replace("$", "\\$")}`)
+        navigator.clipboard.writeText(`{safe_text}`)
           .then(() => document.getElementById('copy-msg').textContent = '✅ Copied!')
           .catch(() => document.getElementById('copy-msg').textContent = '❌ Copy failed');
         setTimeout(() => document.getElementById('copy-msg').textContent = '', 2000);
@@ -296,12 +266,35 @@ if current_text:
 
     # ── Text-to-speech ──────────────────────────────────────────────────────────
     st.subheader("🔊 Read Aloud")
-    tts_component(edited_text, rate=speech_rate)
 
-    st.info(
-        "💡 **Mobile tip:** The Read Aloud button uses your device's built-in voice. "
-        "On iOS you may need to unmute your phone's side switch."
-    )
+    # Warn for very long texts (gTTS may be slow)
+    if word_count > 1500:
+        st.warning(
+            f"⏳ This text is {word_count:,} words — audio generation may take "
+            "20–30 seconds. Consider trimming it or reading in sections."
+        )
+
+    if st.button("🔊 Generate Audio", type="primary", key="gen_audio"):
+        gtts_lang = GTTS_LANG_MAP.get(ocr_lang, "en")
+        with st.spinner("Generating audio — please wait…"):
+            try:
+                audio_bytes = generate_audio(edited_text, lang_code=gtts_lang, slow=slow_mode)
+                st.session_state["audio"] = audio_bytes
+            except Exception as e:
+                st.error(f"Audio generation failed: {e}")
+
+    # Show the player if audio has been generated
+    if "audio" in st.session_state:
+        st.audio(st.session_state["audio"], format="audio/mp3")
+        st.caption("▲ Use the player above to play, pause, or seek. Works on all devices.")
+
+        # Download button so users can save the audio file
+        st.download_button(
+            label="⬇️ Download MP3",
+            data=st.session_state["audio"],
+            file_name="transcription.mp3",
+            mime="audio/mpeg",
+        )
 
 else:
     st.info("👆 Choose an input method above, then click the Extract button to get started.")
