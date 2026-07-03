@@ -3,6 +3,13 @@ import asyncio
 import io
 import os
 
+# ── Trust the Windows certificate store (handles corporate SSL proxies) ────────
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except Exception:
+    pass  # Not on Windows or truststore not installed — continue without it
+
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Text Reader & Transcriber",
@@ -145,15 +152,23 @@ VOICES = {
     "🇦🇺 William — Male, Australian":              "en-AU-WilliamNeural",
 }
 
-# Rate and pitch use the SSML offset format: "+10%", "-5%", "+0%"
-def _rate_label(val: int) -> str:
+def _fmt_rate(val: int) -> str:
+    """edge-tts rate format: '+10%', '-5%', '+0%'"""
     return f"+{val}%" if val >= 0 else f"{val}%"
+
+def _fmt_pitch(val: int) -> str:
+    """edge-tts pitch format: '+10Hz', '-5Hz'  (NOT percent)"""
+    return f"+{val}Hz" if val >= 0 else f"{val}Hz"
 
 
 async def _edge_tts_generate(text: str, voice: str, rate: str, pitch: str) -> bytes:
     """Call edge-tts async API and return raw MP3 bytes."""
     import edge_tts
-    communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
+    # Only pass pitch when it's non-zero — edge-tts rejects '+0Hz' on some versions
+    if pitch in ("+0Hz", "-0Hz", "0Hz"):
+        communicate = edge_tts.Communicate(text, voice, rate=rate)
+    else:
+        communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
     buf = io.BytesIO()
     async for chunk in communicate.stream():
         if chunk["type"] == "audio":
@@ -163,8 +178,8 @@ async def _edge_tts_generate(text: str, voice: str, rate: str, pitch: str) -> by
 
 def generate_audio(text: str, voice: str, rate_pct: int = 0, pitch_pct: int = 0) -> bytes:
     """Synchronous wrapper around the async edge-tts call."""
-    rate  = _rate_label(rate_pct)
-    pitch = _rate_label(pitch_pct)
+    rate  = _fmt_rate(rate_pct)
+    pitch = _fmt_pitch(pitch_pct)
     return asyncio.run(_edge_tts_generate(text, voice, rate, pitch))
 
 
@@ -359,7 +374,7 @@ if current_text:
 
     # ── Audio generation ────────────────────────────────────────────────────────
     st.subheader("🔊 Read Aloud")
-    st.caption(f"Voice: **{voice_label}** · Speed: **{_rate_label(rate_pct)}** · Pitch: **{_rate_label(pitch_pct)}**")
+    st.caption(f"Voice: **{voice_label}** · Speed: **{_fmt_rate(rate_pct)}** · Pitch: **{_fmt_pitch(pitch_pct)}**")
 
     if word_count > 2000:
         st.warning(
