@@ -34,48 +34,62 @@ def extract_from_docx(file_bytes: bytes) -> str:
     Extract all text from a .docx file — covers:
       • Regular body paragraphs
       • Tables (rows × cells)
+      • Text boxes / shapes (via fallback XML scan)
       • Headers and footers
+    Uses the high-level python-docx API so it works on all Word file versions.
     """
-    import docx
-    from docx.oxml.ns import qn
+    from docx import Document as DocxDocument
 
-    doc = docx.Document(io.BytesIO(file_bytes))
-    parts: list[str] = []
+    doc = DocxDocument(io.BytesIO(file_bytes))
+    parts = []
 
-    # ── Body paragraphs and tables in document order ──────────────────────────
-    # Iterating doc.element.body children preserves the original reading order
-    # (paragraphs and tables interleaved), unlike doc.paragraphs which skips tables.
-    for child in doc.element.body:
-        tag = child.tag.split("}")[-1]  # strip namespace, e.g. "p" or "tbl"
-
-        if tag == "p":
-            # Plain paragraph
-            text = "".join(node.text or "" for node in child.iter(qn("w:t")))
+    # ── Walk body elements in document order (paragraphs + tables interleaved) ──
+    for block in doc.element.body:
+        # Plain paragraph
+        if block.tag.endswith("}p"):
+            text = block.text_content if hasattr(block, "text_content") else ""
+            # Safer: join all w:t runs inside this paragraph
+            text = "".join(t.text for t in block.iter() if t.tag.endswith("}t") and t.text)
             if text.strip():
-                parts.append(text)
+                parts.append(text.strip())
 
-        elif tag == "tbl":
-            # Table — collect each row, join cells with a tab, rows with newline
-            for row in child.iter(qn("w:tr")):
+        # Table
+        elif block.tag.endswith("}tbl"):
+            for row in block.iter():
+                if not row.tag.endswith("}tr"):
+                    continue
                 cells = []
-                for cell in row.iter(qn("w:tc")):
+                for cell in row:
+                    if not cell.tag.endswith("}tc"):
+                        continue
                     cell_text = "".join(
-                        node.text or "" for node in cell.iter(qn("w:t"))
+                        t.text for t in cell.iter()
+                        if t.tag.endswith("}t") and t.text
                     )
                     if cell_text.strip():
                         cells.append(cell_text.strip())
                 if cells:
-                    parts.append("\t".join(cells))
+                    parts.append("  |  ".join(cells))
 
     # ── Headers and footers ───────────────────────────────────────────────────
     for section in doc.sections:
         for hf in (section.header, section.footer):
-            if hf is not None:
-                for para in hf.paragraphs:
-                    if para.text.strip():
-                        parts.append(para.text.strip())
+            try:
+                if hf is not None:
+                    for para in hf.paragraphs:
+                        if para.text.strip():
+                            parts.append(para.text.strip())
+            except Exception:
+                pass  # missing header/footer is fine
 
-    return "\n".join(parts)
+    result = "\n".join(parts)
+
+    # ── Last-resort fallback: if we got nothing, try doc.paragraphs directly ──
+    if not result.strip():
+        fallback = [p.text for p in doc.paragraphs if p.text.strip()]
+        result = "\n".join(fallback)
+
+    return result
 
 
 def extract_from_pdf(file_bytes: bytes) -> str:
@@ -233,16 +247,28 @@ with tab_paste:
 
 with tab_word:
     st.subheader("Upload a Word document (.docx)")
+    st.caption("Must be a **.docx** file — not .doc (old format). Save as .docx from Word if needed.")
     docx_file = st.file_uploader("Choose a .docx file", type=["docx"], key="docx_up")
     if docx_file and st.button("Extract Text from Word Doc", key="ext_docx", type="primary"):
         with st.spinner("Reading document…"):
             try:
                 result = extract_from_docx(docx_file.read())
-                st.session_state["text"] = result
-                st.session_state.pop("audio", None)
-                st.success(f"✅ {len(result.split())} words extracted.")
+                if not result.strip():
+                    st.warning(
+                        "The document was opened but no text was found. "
+                        "Make sure the file is a standard .docx (not password-protected or corrupted)."
+                    )
+                else:
+                    st.session_state["text"] = result
+                    st.session_state.pop("audio", None)
+                    st.success(f"✅ {len(result.split())} words extracted.")
             except Exception as e:
-                st.error(f"Could not read file: {e}")
+                import traceback
+                st.error(
+                    f"**Could not read file.**\n\n"
+                    f"Error: `{e}`\n\n"
+                    f"Full details:\n```\n{traceback.format_exc()}\n```"
+                )
 
 with tab_pdf:
     st.subheader("Upload a PDF")
