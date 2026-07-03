@@ -1,4 +1,5 @@
 import streamlit as st
+import asyncio
 import io
 import os
 
@@ -24,6 +25,7 @@ def find_tesseract():
         if os.path.isfile(path):
             return path
     return None
+
 
 # ── Extraction helpers ──────────────────────────────────────────────────────────
 
@@ -67,45 +69,48 @@ def extract_from_image(file_bytes: bytes, lang: str = "eng") -> str:
     return pytesseract.image_to_string(image, lang=lang)
 
 
-# ── Text-to-speech via gTTS ─────────────────────────────────────────────────────
+# ── Edge TTS helpers ────────────────────────────────────────────────────────────
 
-# gTTS language codes mapped to our OCR language codes for convenience
-GTTS_LANG_MAP = {
-    "eng": "en",
-    "spa": "es",
-    "fra": "fr",
-    "deu": "de",
-    "ita": "it",
-    "por": "pt",
-    "chi_sim": "zh-CN",
-    "jpn": "ja",
+# Curated list of the best English neural voices available via edge-tts.
+# Full name format used by the edge-tts library.
+VOICES = {
+    # ── English (US) ──
+    "🇺🇸 Aria  — Female, warm & friendly":        "en-US-AriaNeural",
+    "🇺🇸 Jenny — Female, conversational":          "en-US-JennyNeural",
+    "🇺🇸 Michelle — Female, clear & professional": "en-US-MichelleNeural",
+    "🇺🇸 Guy   — Male, casual":                    "en-US-GuyNeural",
+    "🇺🇸 Davis — Male, energetic":                 "en-US-DavisNeural",
+    "🇺🇸 Tony  — Male, calm":                      "en-US-TonyNeural",
+    # ── English (UK) ──
+    "🇬🇧 Libby  — Female, British":                "en-GB-LibbyNeural",
+    "🇬🇧 Sonia  — Female, British professional":   "en-GB-SoniaNeural",
+    "🇬🇧 Ryan   — Male, British":                  "en-GB-RyanNeural",
+    # ── English (AU) ──
+    "🇦🇺 Natasha — Female, Australian":            "en-AU-NatashaNeural",
+    "🇦🇺 William — Male, Australian":              "en-AU-WilliamNeural",
 }
 
-def generate_audio(text: str, lang_code: str = "en", slow: bool = False) -> bytes:
-    """
-    Convert text to speech using gTTS and return MP3 bytes.
-    gTTS calls Google's TTS service — requires internet but works on
-    Streamlit Cloud and every mobile browser via st.audio().
-    """
-    from gtts import gTTS
+# Rate and pitch use the SSML offset format: "+10%", "-5%", "+0%"
+def _rate_label(val: int) -> str:
+    return f"+{val}%" if val >= 0 else f"{val}%"
 
-    # gTTS can struggle with very long texts in one shot; chunk at ~2 000 chars
-    CHUNK_SIZE = 2000
-    if len(text) <= CHUNK_SIZE:
-        tts = gTTS(text=text, lang=lang_code, slow=slow)
-        buf = io.BytesIO()
-        tts.write_to_fp(buf)
-        return buf.getvalue()
 
-    # For longer texts, generate each chunk and concatenate the raw MP3 bytes
-    chunks = [text[i: i + CHUNK_SIZE] for i in range(0, len(text), CHUNK_SIZE)]
-    audio_parts = []
-    for chunk in chunks:
-        tts = gTTS(text=chunk, lang=lang_code, slow=slow)
-        buf = io.BytesIO()
-        tts.write_to_fp(buf)
-        audio_parts.append(buf.getvalue())
-    return b"".join(audio_parts)
+async def _edge_tts_generate(text: str, voice: str, rate: str, pitch: str) -> bytes:
+    """Call edge-tts async API and return raw MP3 bytes."""
+    import edge_tts
+    communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
+    buf = io.BytesIO()
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            buf.write(chunk["data"])
+    return buf.getvalue()
+
+
+def generate_audio(text: str, voice: str, rate_pct: int = 0, pitch_pct: int = 0) -> bytes:
+    """Synchronous wrapper around the async edge-tts call."""
+    rate  = _rate_label(rate_pct)
+    pitch = _rate_label(pitch_pct)
+    return asyncio.run(_edge_tts_generate(text, voice, rate, pitch))
 
 
 # ── Sidebar ─────────────────────────────────────────────────────────────────────
@@ -117,14 +122,36 @@ with st.sidebar:
         1. Pick an input method (tabs below)
         2. Paste text or upload a file
         3. Click **Extract Text**
-        4. Click **🔊 Generate Audio** to create the audio
-        5. Press play on the audio player
+        4. Choose a voice, then click **🔊 Generate Audio**
+        5. Press ▶ on the audio player
         """
     )
     st.divider()
-    st.subheader("⚙️ Settings")
-    slow_mode = st.checkbox("🐢 Slow reading speed", value=False)
-    ocr_lang  = st.selectbox(
+    st.subheader("⚙️ Voice Settings")
+
+    voice_label = st.selectbox(
+        "Voice",
+        options=list(VOICES.keys()),
+        index=0,
+    )
+    selected_voice = VOICES[voice_label]
+
+    rate_pct = st.slider(
+        "Reading speed",
+        min_value=-50, max_value=100, value=0, step=5,
+        help="0% = normal speed. Negative = slower, positive = faster.",
+        format="%d%%",
+    )
+    pitch_pct = st.slider(
+        "Pitch",
+        min_value=-50, max_value=50, value=0, step=5,
+        help="0% = natural pitch. Negative = deeper, positive = higher.",
+        format="%d%%",
+    )
+
+    st.divider()
+    st.subheader("🔤 Other Settings")
+    ocr_lang = st.selectbox(
         "OCR language (images)",
         options=["eng", "spa", "fra", "deu", "ita", "por", "chi_sim", "jpn"],
         format_func=lambda x: {
@@ -134,7 +161,7 @@ with st.sidebar:
         }.get(x, x),
     )
     st.divider()
-    st.caption("Audio is generated by Google TTS — works on all devices including mobile.")
+    st.caption("Voices powered by Microsoft Edge Neural TTS — free, no API key needed.")
 
 
 # ── Main area ───────────────────────────────────────────────────────────────────
@@ -158,7 +185,7 @@ with tab_paste:
     if st.button("Use This Text", key="use_paste", type="primary"):
         if pasted.strip():
             st.session_state["text"] = pasted.strip()
-            st.session_state.pop("audio", None)   # clear old audio
+            st.session_state.pop("audio", None)
             st.success(f"✅ {len(pasted.split())} words loaded.")
         else:
             st.warning("Nothing to use — text area is empty.")
@@ -224,9 +251,8 @@ st.subheader("📝 Extracted / Transcribed Text")
 current_text = st.session_state.get("text", "")
 
 if current_text:
-    # Editable display — user can tweak before generating audio
     edited_text = st.text_area(
-        "Text (editable — make changes before generating audio)",
+        "Text (editable — tweak before generating audio)",
         value=current_text,
         height=300,
         label_visibility="collapsed",
@@ -244,7 +270,7 @@ if current_text:
             st.session_state.pop("audio", None)
             st.rerun()
 
-    # Copy-to-clipboard button
+    # Copy-to-clipboard
     safe_text = edited_text.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
     copy_js = f"""
     <script>
@@ -264,31 +290,36 @@ if current_text:
     """
     st.components.v1.html(copy_js, height=50)
 
-    # ── Text-to-speech ──────────────────────────────────────────────────────────
+    # ── Audio generation ────────────────────────────────────────────────────────
     st.subheader("🔊 Read Aloud")
+    st.caption(f"Voice: **{voice_label}** · Speed: **{_rate_label(rate_pct)}** · Pitch: **{_rate_label(pitch_pct)}**")
 
-    # Warn for very long texts (gTTS may be slow)
-    if word_count > 1500:
+    if word_count > 2000:
         st.warning(
-            f"⏳ This text is {word_count:,} words — audio generation may take "
-            "20–30 seconds. Consider trimming it or reading in sections."
+            f"⏳ {word_count:,} words is a long read — audio generation may take "
+            "30–60 seconds. You can also trim the text above and generate in sections."
         )
 
     if st.button("🔊 Generate Audio", type="primary", key="gen_audio"):
-        gtts_lang = GTTS_LANG_MAP.get(ocr_lang, "en")
-        with st.spinner("Generating audio — please wait…"):
+        with st.spinner(f"Generating audio with {voice_label.split('—')[0].strip()}…"):
             try:
-                audio_bytes = generate_audio(edited_text, lang_code=gtts_lang, slow=slow_mode)
+                audio_bytes = generate_audio(
+                    edited_text,
+                    voice=selected_voice,
+                    rate_pct=rate_pct,
+                    pitch_pct=pitch_pct,
+                )
                 st.session_state["audio"] = audio_bytes
             except Exception as e:
-                st.error(f"Audio generation failed: {e}")
+                st.error(
+                    f"Audio generation failed: {e}\n\n"
+                    "Make sure you have an internet connection — "
+                    "Microsoft Edge TTS requires it."
+                )
 
-    # Show the player if audio has been generated
     if "audio" in st.session_state:
         st.audio(st.session_state["audio"], format="audio/mp3")
-        st.caption("▲ Use the player above to play, pause, or seek. Works on all devices.")
-
-        # Download button so users can save the audio file
+        st.caption("▲ Tap ▶ to play. Works on all devices and mobile browsers.")
         st.download_button(
             label="⬇️ Download MP3",
             data=st.session_state["audio"],
