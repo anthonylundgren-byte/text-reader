@@ -30,11 +30,52 @@ def find_tesseract():
 # ── Extraction helpers ──────────────────────────────────────────────────────────
 
 def extract_from_docx(file_bytes: bytes) -> str:
-    """Extract all paragraph text from a .docx file."""
+    """
+    Extract all text from a .docx file — covers:
+      • Regular body paragraphs
+      • Tables (rows × cells)
+      • Headers and footers
+    """
     import docx
+    from docx.oxml.ns import qn
+
     doc = docx.Document(io.BytesIO(file_bytes))
-    paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-    return "\n".join(paragraphs)
+    parts: list[str] = []
+
+    # ── Body paragraphs and tables in document order ──────────────────────────
+    # Iterating doc.element.body children preserves the original reading order
+    # (paragraphs and tables interleaved), unlike doc.paragraphs which skips tables.
+    for child in doc.element.body:
+        tag = child.tag.split("}")[-1]  # strip namespace, e.g. "p" or "tbl"
+
+        if tag == "p":
+            # Plain paragraph
+            text = "".join(node.text or "" for node in child.iter(qn("w:t")))
+            if text.strip():
+                parts.append(text)
+
+        elif tag == "tbl":
+            # Table — collect each row, join cells with a tab, rows with newline
+            for row in child.iter(qn("w:tr")):
+                cells = []
+                for cell in row.iter(qn("w:tc")):
+                    cell_text = "".join(
+                        node.text or "" for node in cell.iter(qn("w:t"))
+                    )
+                    if cell_text.strip():
+                        cells.append(cell_text.strip())
+                if cells:
+                    parts.append("\t".join(cells))
+
+    # ── Headers and footers ───────────────────────────────────────────────────
+    for section in doc.sections:
+        for hf in (section.header, section.footer):
+            if hf is not None:
+                for para in hf.paragraphs:
+                    if para.text.strip():
+                        parts.append(para.text.strip())
+
+    return "\n".join(parts)
 
 
 def extract_from_pdf(file_bytes: bytes) -> str:
