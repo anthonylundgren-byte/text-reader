@@ -3,3 +3,4 @@ python-docx
 pdfplumber
 pytesseract
 Pillow
+gtts
