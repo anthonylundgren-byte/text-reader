@@ -3,4 +3,4 @@ python-docx
 pdfplumber
 pytesseract
 Pillow
-gtts
+edge-tts
